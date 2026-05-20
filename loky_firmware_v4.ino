@@ -1,7 +1,7 @@
 // **********************************************************************************
-// LoKy ACC v4.0 — Firmware Final avec OTA automatique
+// LoKy ACC v4.0.0 — Firmware Final avec OTA GitHub
 // ESP32 WeMos D1 Mini + JSY-MK-163T
-// Mise à jour automatique silencieuse via WiFi
+// Config et firmware hébergés sur GitHub Pages
 // **********************************************************************************
 
 #include <WiFi.h>
@@ -12,24 +12,22 @@
 #include <ArduinoJson.h>
 #include <MycilaJSY.h>
 
-// =================== VERSION FIRMWARE ===================
-#define FIRMWARE_VERSION  "4.0.0"
+// =================== VERSION ===================
+#define FIRMWARE_VERSION "4.0.0"
 
-// =================== URL FIXE (ne change jamais !) ===================
-// C'est la seule URL hardcodée — pointe vers le fichier de config
-#define CONFIG_URL "https://bidules3d.com/fred/loky/firmware/config.json"
+// =================== URL FIXE GITHUB (ne change JAMAIS) ===================
+#define CONFIG_URL "https://frederic76430.github.io/loky-config/config.json"
 
-// Valeurs par défaut (écrasées par config.json)
-#define DEFAULT_API_URL    "https://bidules3d.com/fred/loky/api.php"
-#define DEFAULT_UPDATE_URL "https://bidules3d.com/fred/loky/firmware/"
+// =================== VALEURS PAR DÉFAUT ===================
+#define DEFAULT_API_URL "https://bidules3d.com/fred/loky/api.php"
 
 // =================== PARAMÈTRES ===================
-#define SEND_INTERVAL_MS   30000    // Envoi données toutes les 30s
-#define OTA_CHECK_MS       3600000  // Vérifier MAJ toutes les heures
-#define SURPLUS_THRESHOLD  200
-#define LONG_PRESS_MS      5000
-#define WIFI_RETRY_MS      30000
-#define WIFI_CHECK_MS      15000
+#define SEND_INTERVAL_MS  30000
+#define OTA_CHECK_MS      3600000
+#define SURPLUS_THRESHOLD 200
+#define LONG_PRESS_MS     5000
+#define WIFI_RETRY_MS     30000
+#define WIFI_CHECK_MS     15000
 
 // =================== PINS ===================
 #define PIN_JSY_RX  16
@@ -37,562 +35,269 @@
 #define PIN_LED     2
 #define PIN_BTN     0
 
-// =================== OBJETS ===================
 Mycila::JSY  jsy;
 Preferences  preferences;
 HTTPClient   http;
 
-// =================== CONFIG SERVEUR ===================
-char api_url[200]    = DEFAULT_API_URL;
-char update_url[200] = DEFAULT_UPDATE_URL;
+char api_url[200]       = DEFAULT_API_URL;
+char firmware_url[300]  = "";
 char server_version[20] = "0.0.0";
-
-// =================== CONFIG UTILISATEUR ===================
 char participant_id[32] = "";
 char acc_name[32]       = "";
 
-// =================== MESURES JSY ===================
-float  ch1_voltage    = 0;
-float  ch1_current    = 0;
-float  ch1_power      = 0;
-float  ch1_energy_in  = 0;
-float  ch1_energy_out = 0;
-float  ch1_pf         = 0;
-float  total_power    = 0;
-bool   jsy_ready      = false;
-bool   has_pending    = false;
+float  ch1_voltage=0,ch1_current=0,ch1_power=0;
+float  ch1_energy_in=0,ch1_energy_out=0,ch1_pf=0,total_power=0;
+bool   jsy_ready=false,has_pending=false;
 
-// =================== TIMING ===================
-unsigned long last_send_ms     = 0;
-unsigned long last_ota_check   = 0;
-unsigned long uptime_s         = 0;
-unsigned long prev_tick        = 0;
-unsigned long last_wifi_check  = 0;
-unsigned long last_wifi_retry  = 0;
+unsigned long last_send_ms=0,last_ota_check=0,uptime_s=0;
+unsigned long prev_tick=0,last_wifi_check=0,last_wifi_retry=0;
+unsigned long btn_press_start=0,led_blink_ms=0;
+bool btn_was_pressed=false,long_press_done=false;
+int  led_blink_dur=0;
 
-// =================== BOUTON ===================
-unsigned long btn_press_start = 0;
-bool          btn_was_pressed = false;
-bool          long_press_done = false;
+enum WifiState{WIFI_OK,WIFI_LOST,WIFI_RECONNECTING};
+WifiState wifi_state=WIFI_OK;
 
-// =================== LED ===================
-unsigned long led_blink_ms  = 0;
-int           led_blink_dur = 0;
+void ledOn(){digitalWrite(PIN_LED,HIGH);}
+void ledOff(){digitalWrite(PIN_LED,LOW);}
+void ledBlink(int d){ledOn();led_blink_ms=millis();led_blink_dur=d;}
+void ledPattern(int n,int on,int off){for(int i=0;i<n;i++){ledOn();delay(on);ledOff();delay(off);}}
 
-// =================== WIFI STATE ===================
-enum WifiState { WIFI_OK, WIFI_LOST, WIFI_RECONNECTING };
-WifiState wifi_state = WIFI_OK;
-
-// ================================================
-// LED
-// ================================================
-void ledOn()  { digitalWrite(PIN_LED, HIGH); }
-void ledOff() { digitalWrite(PIN_LED, LOW); }
-void ledBlink(int dur) { ledOn(); led_blink_ms = millis(); led_blink_dur = dur; }
-
-void ledPattern(int times, int onMs, int offMs) {
-    for (int i = 0; i < times; i++) {
-        ledOn(); delay(onMs); ledOff(); delay(offMs);
-    }
-}
-
-// ================================================
-// CONFIG FLASH
-// ================================================
-void saveConfig() {
-    preferences.begin("loky", false);
-    preferences.putString("pid", participant_id);
-    preferences.putString("acc", acc_name);
-    preferences.putString("api", api_url);
-    preferences.putString("upd", update_url);
+void saveConfig(){
+    preferences.begin("loky",false);
+    preferences.putString("pid",participant_id);
+    preferences.putString("acc",acc_name);
+    preferences.putString("api",api_url);
+    preferences.putString("fwu",firmware_url);
+    preferences.putString("fwv",server_version);
     preferences.end();
-    Serial.printf("[CFG] Sauvegardé — ID=%s ACC=%s\n", participant_id, acc_name);
 }
 
-void loadConfig() {
-    preferences.begin("loky", true);
-    preferences.getString("pid", "").toCharArray(participant_id, sizeof(participant_id));
-    preferences.getString("acc", "").toCharArray(acc_name,       sizeof(acc_name));
-    preferences.getString("api", DEFAULT_API_URL).toCharArray(api_url,    sizeof(api_url));
-    preferences.getString("upd", DEFAULT_UPDATE_URL).toCharArray(update_url, sizeof(update_url));
+void loadConfig(){
+    preferences.begin("loky",true);
+    preferences.getString("pid","").toCharArray(participant_id,sizeof(participant_id));
+    preferences.getString("acc","").toCharArray(acc_name,sizeof(acc_name));
+    preferences.getString("api",DEFAULT_API_URL).toCharArray(api_url,sizeof(api_url));
+    preferences.getString("fwu","").toCharArray(firmware_url,sizeof(firmware_url));
+    preferences.getString("fwv","0.0.0").toCharArray(server_version,sizeof(server_version));
     preferences.end();
-    Serial.printf("[CFG] ID=%s ACC=%s API=%s\n", participant_id, acc_name, api_url);
+    Serial.printf("[CFG] v%s ID=%s ACC=%s\n",FIRMWARE_VERSION,participant_id,acc_name);
+    Serial.printf("[CFG] API=%s\n",api_url);
 }
 
-// ================================================
-// RÉCUPÉRER CONFIG SERVEUR (URL + version dispo)
-// ================================================
-bool fetchServerConfig() {
-    if (WiFi.status() != WL_CONNECTED) return false;
-
-    Serial.println("[CFG] Récupération config serveur...");
-
-    HTTPClient httpClient;
-    httpClient.begin(CONFIG_URL);
-    httpClient.setTimeout(10000);
-    httpClient.addHeader("X-LoKy-Version", FIRMWARE_VERSION);
-    httpClient.addHeader("X-LoKy-ID", participant_id);
-
-    int code = httpClient.GET();
-
-    if (code == 200) {
-        String body = httpClient.getString();
-        Serial.println("[CFG] Config reçue : " + body);
-
-        DynamicJsonDocument doc(512);
-        if (deserializeJson(doc, body) == DeserializationError::Ok) {
-
-            // Mettre à jour l'URL API si changée
-            if (doc.containsKey("api_url")) {
-                String newApi = doc["api_url"].as<String>();
-                if (newApi != String(api_url)) {
-                    Serial.printf("[CFG] URL API mise à jour : %s\n", newApi.c_str());
-                    newApi.toCharArray(api_url, sizeof(api_url));
-                    saveConfig();
+bool fetchGitHubConfig(){
+    if(WiFi.status()!=WL_CONNECTED) return false;
+    Serial.println("[GH] Récupération config...");
+    HTTPClient hc;
+    hc.begin(CONFIG_URL);
+    hc.setTimeout(15000);
+    hc.addHeader("User-Agent","LoKy-ACC/" FIRMWARE_VERSION);
+    hc.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code=hc.GET();
+    Serial.printf("[GH] HTTP %d\n",code);
+    if(code==200){
+        String body=hc.getString();
+        DynamicJsonDocument doc(1024);
+        if(deserializeJson(doc,body)==DeserializationError::Ok){
+            bool changed=false;
+            if(doc.containsKey("api_url")){
+                String na=doc["api_url"].as<String>();
+                if(na.length()>8&&na!=String(api_url)){
+                    Serial.printf("[GH] Nouvelle API: %s\n",na.c_str());
+                    na.toCharArray(api_url,sizeof(api_url));
+                    changed=true;
                 }
             }
-
-            // URL de mise à jour
-            if (doc.containsKey("update_url")) {
-                doc["update_url"].as<String>().toCharArray(update_url, sizeof(update_url));
-            }
-
-            // Version disponible sur le serveur
-            if (doc.containsKey("firmware_version")) {
-                doc["firmware_version"].as<String>().toCharArray(server_version, sizeof(server_version));
-            }
-
-            Serial.printf("[CFG] Version serveur : %s | Version locale : %s\n",
-                          server_version, FIRMWARE_VERSION);
-
-            httpClient.end();
+            if(doc.containsKey("firmware_version"))
+                doc["firmware_version"].as<String>().toCharArray(server_version,sizeof(server_version));
+            if(doc.containsKey("firmware_url"))
+                doc["firmware_url"].as<String>().toCharArray(firmware_url,sizeof(firmware_url));
+            if(changed) saveConfig();
+            hc.end();
+            Serial.printf("[GH] Serveur:v%s Local:v%s\n",server_version,FIRMWARE_VERSION);
             return true;
         }
-    } else {
-        Serial.printf("[CFG] Erreur récupération config : %d\n", code);
     }
-
-    httpClient.end();
+    hc.end();
     return false;
 }
 
-// ================================================
-// COMPARAISON DE VERSIONS SEMVER
-// ================================================
-bool isNewerVersion(const char* serverVer, const char* localVer) {
-    int sMaj = 0, sMin = 0, sPat = 0;
-    int lMaj = 0, lMin = 0, lPat = 0;
-
-    sscanf(serverVer, "%d.%d.%d", &sMaj, &sMin, &sPat);
-    sscanf(localVer,  "%d.%d.%d", &lMaj, &lMin, &lPat);
-
-    if (sMaj != lMaj) return sMaj > lMaj;
-    if (sMin != lMin) return sMin > lMin;
-    return sPat > lPat;
+bool isNewerVersion(const char* s,const char* l){
+    int sM=0,sm=0,sp=0,lM=0,lm=0,lp=0;
+    sscanf(s,"%d.%d.%d",&sM,&sm,&sp);
+    sscanf(l,"%d.%d.%d",&lM,&lm,&lp);
+    if(sM!=lM)return sM>lM;
+    if(sm!=lm)return sm>lm;
+    return sp>lp;
 }
 
-// ================================================
-// OTA — MISE À JOUR FIRMWARE
-// ================================================
-void checkAndUpdate() {
-    if (WiFi.status() != WL_CONNECTED) return;
-    if (strlen(server_version) == 0 || strcmp(server_version, "0.0.0") == 0) return;
-
-    if (!isNewerVersion(server_version, FIRMWARE_VERSION)) {
-        Serial.printf("[OTA] Firmware à jour (v%s)\n", FIRMWARE_VERSION);
+void checkAndUpdate(){
+    if(WiFi.status()!=WL_CONNECTED) return;
+    if(!isNewerVersion(server_version,FIRMWARE_VERSION)){
+        Serial.printf("[OTA] A jour (v%s)\n",FIRMWARE_VERSION);
         return;
     }
-
-    Serial.printf("[OTA] 🆕 Nouvelle version disponible : v%s (actuelle: v%s)\n",
-                  server_version, FIRMWARE_VERSION);
-
-    // LED pattern OTA : 3 clignotements rapides
-    ledPattern(3, 100, 100);
-
-    // Construire l'URL du firmware
-    String firmwareUrl = String(update_url) + "loky_v" + server_version + ".bin";
-    Serial.printf("[OTA] Téléchargement : %s\n", firmwareUrl.c_str());
-
-    // Callbacks OTA
-    httpUpdate.onStart([]() {
-        Serial.println("[OTA] ⬇️ Début téléchargement...");
-        ledOn();
+    if(strlen(firmware_url)<10){Serial.println("[OTA] URL manquante");return;}
+    Serial.printf("[OTA] Nouvelle v%s ! URL: %s\n",server_version,firmware_url);
+    ledPattern(3,100,100);
+    httpUpdate.onStart([](){Serial.println("[OTA] Debut...");ledOn();});
+    httpUpdate.onEnd([](){Serial.println("[OTA] Termine!");ledPattern(5,50,50);});
+    httpUpdate.onProgress([](int c,int t){
+        static int last=-1;int p=(c*100)/t;
+        if(p!=last&&p%10==0){Serial.printf("[OTA] %d%%\n",p);last=p;}
     });
-
-    httpUpdate.onEnd([]() {
-        Serial.println("[OTA] ✅ Téléchargement terminé — redémarrage...");
-        ledPattern(5, 50, 50);
+    httpUpdate.onError([](int e){
+        Serial.printf("[OTA] Erreur: %s\n",httpUpdate.getLastErrorString().c_str());
+        ledPattern(3,500,200);
     });
-
-    httpUpdate.onProgress([](int cur, int total) {
-        static int lastPct = -1;
-        int pct = (cur * 100) / total;
-        if (pct != lastPct && pct % 10 == 0) {
-            Serial.printf("[OTA] Progression : %d%%\n", pct);
-            lastPct = pct;
-        }
-    });
-
-    httpUpdate.onError([](int err) {
-        Serial.printf("[OTA] ❌ Erreur : %s\n", httpUpdate.getLastErrorString().c_str());
-        ledPattern(3, 500, 200);
-    });
-
-    // Lancer la mise à jour
-    HTTPClient httpOTA;
-    httpOTA.begin(firmwareUrl);
-
-    t_httpUpdate_return ret = httpUpdate.update(httpOTA);
-
-    switch (ret) {
-        case HTTP_UPDATE_FAILED:
-            Serial.printf("[OTA] ❌ Échec : %s\n", httpUpdate.getLastErrorString().c_str());
-            break;
-        case HTTP_UPDATE_NO_UPDATES:
-            Serial.println("[OTA] Pas de mise à jour");
-            break;
-        case HTTP_UPDATE_OK:
-            Serial.println("[OTA] ✅ Mise à jour réussie — redémarrage");
-            // ESP32 redémarre automatiquement
-            break;
-    }
-
-    httpOTA.end();
+    HTTPClient ho;
+    ho.begin(firmware_url);
+    ho.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    httpUpdate.update(ho);
+    ho.end();
 }
 
-// ================================================
-// JSY CALLBACK
-// ================================================
-void jsyCallback(Mycila::JSY::EventType eventType,
-                 const Mycila::JSY::Data& data) {
-    if (eventType != Mycila::JSY::EventType::EVT_READ) return;
-
-    ch1_voltage    = data.single().voltage;
-    ch1_current    = data.single().current;
-    ch1_power      = data.single().activePower;
-    ch1_energy_in  = data.single().activeEnergyImported;
-    ch1_energy_out = data.single().activeEnergyReturned;
-    ch1_pf         = data.single().powerFactor;
-    total_power    = ch1_power;
-    jsy_ready      = true;
-    has_pending    = true;
-
-    if (total_power < -SURPLUS_THRESHOLD) {
-        Serial.printf("[JSY] ⚡ SURPLUS [%s] : %.0fW\n", acc_name, -total_power);
-        ledBlink(50);
-    }
+void jsyCallback(Mycila::JSY::EventType et,const Mycila::JSY::Data& d){
+    if(et!=Mycila::JSY::EventType::EVT_READ) return;
+    ch1_voltage=d.single().voltage;ch1_current=d.single().current;
+    ch1_power=d.single().activePower;ch1_energy_in=d.single().activeEnergyImported;
+    ch1_energy_out=d.single().activeEnergyReturned;ch1_pf=d.single().powerFactor;
+    total_power=ch1_power;jsy_ready=has_pending=true;
+    if(total_power<-SURPLUS_THRESHOLD)
+        Serial.printf("[JSY] SURPLUS [%s]: %.0fW\n",acc_name,-total_power);
 }
 
-// ================================================
-// ENVOI DONNÉES SERVEUR
-// ================================================
-void sendToServer() {
-    if (WiFi.status() != WL_CONNECTED) return;
-    if (strlen(api_url) < 8) return;
-
+void sendToServer(){
+    if(WiFi.status()!=WL_CONNECTED||strlen(api_url)<8) return;
     DynamicJsonDocument doc(1024);
-    doc["id"]      = participant_id;
-    doc["acc"]     = acc_name;
-    doc["uptime"]  = uptime_s;
-    doc["rssi"]    = WiFi.RSSI();
-    doc["ip"]      = WiFi.localIP().toString();
-    doc["fw"]      = FIRMWARE_VERSION;
-
-    JsonObject ch1    = doc.createNestedObject("ch1");
-    ch1["voltage"]    = round(ch1_voltage    * 10)   / 10.0;
-    ch1["current"]    = round(ch1_current    * 1000) / 1000.0;
-    ch1["power"]      = round(ch1_power      * 10)   / 10.0;
-    ch1["energy_in"]  = round(ch1_energy_in  * 1000) / 1000.0;
-    ch1["energy_out"] = round(ch1_energy_out * 1000) / 1000.0;
-    ch1["pf"]         = round(ch1_pf         * 100)  / 100.0;
-
-    doc["total_power"] = round(total_power * 10) / 10.0;
-    doc["surplus"]     = total_power < 0 ? round(-total_power * 10) / 10.0 : 0;
-    doc["is_surplus"]  = total_power < -SURPLUS_THRESHOLD;
-
-    String json;
-    serializeJson(doc, json);
-
+    doc["id"]=participant_id;doc["acc"]=acc_name;
+    doc["uptime"]=uptime_s;doc["rssi"]=WiFi.RSSI();
+    doc["ip"]=WiFi.localIP().toString();doc["fw"]=FIRMWARE_VERSION;
+    JsonObject c1=doc.createNestedObject("ch1");
+    c1["voltage"]=round(ch1_voltage*10)/10.0;c1["current"]=round(ch1_current*1000)/1000.0;
+    c1["power"]=round(ch1_power*10)/10.0;c1["energy_in"]=round(ch1_energy_in*1000)/1000.0;
+    c1["energy_out"]=round(ch1_energy_out*1000)/1000.0;c1["pf"]=round(ch1_pf*100)/100.0;
+    doc["total_power"]=round(total_power*10)/10.0;
+    doc["surplus"]=total_power<0?round(-total_power*10)/10.0:0;
+    doc["is_surplus"]=total_power<-SURPLUS_THRESHOLD;
+    String json; serializeJson(doc,json);
     http.begin(api_url);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("X-LoKy-ID",      participant_id);
-    http.addHeader("X-LoKy-ACC",     acc_name);
-    http.addHeader("X-LoKy-Version", FIRMWARE_VERSION);
+    http.addHeader("Content-Type","application/json");
+    http.addHeader("X-LoKy-ID",participant_id);
+    http.addHeader("X-LoKy-ACC",acc_name);
+    http.addHeader("X-LoKy-Version",FIRMWARE_VERSION);
     http.setTimeout(8000);
-
-    int code = http.POST(json);
-    if (code > 0) {
-        Serial.printf("[HTTP] ✓ %d — surplus=%.0fW\n", code,
-                      total_power < 0 ? -total_power : 0.0f);
-        if (code == 200) ledBlink(100);
-    } else {
-        Serial.printf("[HTTP] ✗ %s\n", http.errorToString(code).c_str());
-    }
-    http.end();
-    last_send_ms = millis();
-    has_pending  = false;
+    int code=http.POST(json);
+    if(code>0){Serial.printf("[HTTP] %d\n",code);if(code==200)ledBlink(100);}
+    else Serial.printf("[HTTP] Err: %s\n",http.errorToString(code).c_str());
+    http.end();last_send_ms=millis();has_pending=false;
 }
 
-// ================================================
-// GESTION WIFI ROBUSTE
-// ================================================
-void handleWiFiReconnect() {
-    unsigned long now = millis();
-    if (now - last_wifi_check < WIFI_CHECK_MS) return;
-    last_wifi_check = now;
-
-    if (WiFi.status() == WL_CONNECTED) {
-        if (wifi_state != WIFI_OK) {
-            Serial.printf("[WIFI] ✓ Reconnecté ! IP=%s\n",
-                          WiFi.localIP().toString().c_str());
-            wifi_state = WIFI_OK;
-            // Récupérer la config après reconnexion
-            fetchServerConfig();
+void handleWiFiReconnect(){
+    unsigned long now=millis();
+    if(now-last_wifi_check<WIFI_CHECK_MS) return;
+    last_wifi_check=now;
+    if(WiFi.status()==WL_CONNECTED){
+        if(wifi_state!=WIFI_OK){
+            Serial.printf("[WIFI] Reconnecte! IP=%s\n",WiFi.localIP().toString().c_str());
+            wifi_state=WIFI_OK;fetchGitHubConfig();
         }
         return;
     }
-
-    if (wifi_state == WIFI_OK) {
-        Serial.println("[WIFI] ⚠ Connexion perdue !");
-        wifi_state = WIFI_LOST;
-    }
-
-    if (now - last_wifi_retry < WIFI_RETRY_MS) return;
-    last_wifi_retry = now;
-
-    wifi_state = WIFI_RECONNECTING;
-    Serial.println("[WIFI] Tentative reconnexion...");
+    if(wifi_state==WIFI_OK){Serial.println("[WIFI] Perdu!");wifi_state=WIFI_LOST;}
+    if(now-last_wifi_retry<WIFI_RETRY_MS) return;
+    last_wifi_retry=now;wifi_state=WIFI_RECONNECTING;
     WiFi.reconnect();
-
-    unsigned long t = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) {
-        delay(500); Serial.print(".");
-    }
+    unsigned long t=millis();
+    while(WiFi.status()!=WL_CONNECTED&&millis()-t<10000){delay(500);Serial.print(".");}
     Serial.println();
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("[WIFI] ✓ Reconnecté !");
-        wifi_state = WIFI_OK;
-        ledBlink(300);
-    }
+    if(WiFi.status()==WL_CONNECTED){wifi_state=WIFI_OK;ledBlink(300);}
 }
 
-// ================================================
-// CONNEXION WIFI + PORTAIL
-// ================================================
-bool connectWiFi() {
-    WiFi.setAutoReconnect(true);
-    WiFi.persistent(true);
-    WiFi.mode(WIFI_STA);
-
-    WiFiManagerParameter param_id(
-        "pid", "Votre identifiant (ex: MARTIN_01)", participant_id, 31);
-    WiFiManagerParameter param_acc(
-        "acc", "Nom de votre ACC (ex: ACC_DUPONT)", acc_name, 31);
-
+bool connectWiFi(){
+    WiFi.setAutoReconnect(true);WiFi.persistent(true);WiFi.mode(WIFI_STA);
+    WiFiManagerParameter p1("pid","Identifiant (ex: MARTIN_01)",participant_id,31);
+    WiFiManagerParameter p2("acc","Nom ACC (ex: ACC_DUPONT)",acc_name,31);
     WiFiManager wm;
-    wm.addParameter(&param_id);
-    wm.addParameter(&param_acc);
-    wm.setConnectTimeout(20);
-    wm.setConfigPortalTimeout(600);
-    wm.setScanDispPerc(true);
-    wm.setBreakAfterConfig(true);
-    wm.setCleanConnect(true);
-
-    wm.setCustomHeadElement(
-        "<style>"
-        "body{font-family:Arial,sans-serif;background:#050d1a !important;color:#e0f0ff !important;margin:0;padding:16px;}"
-        "body *{color:#e0f0ff;}"
-        "h1{color:#00d4ff !important;text-align:center;}"
-        "h3{color:#4a7090 !important;text-align:center;font-size:.85rem;}"
-        "input[type=text],input[type=password]{background:#0a1628 !important;color:#e0f0ff !important;border:1px solid #00d4ff !important;border-radius:8px !important;padding:12px !important;width:100% !important;box-sizing:border-box !important;margin:6px 0 !important;}"
-        "input[type=submit],button{background:linear-gradient(135deg,#00d4ff,#00ff9d) !important;color:#050d1a !important;border:none !important;padding:14px !important;border-radius:8px !important;font-weight:bold !important;width:100% !important;margin-top:10px !important;}"
-        ".wifilist{list-style:none !important;padding:0 !important;}"
-        ".wifilist li{background:#0a1628 !important;border:1px solid #0e2a4a !important;border-radius:10px !important;margin:8px 0 !important;overflow:hidden !important;}"
-        ".wifilist li a{display:flex !important;justify-content:space-between !important;align-items:center !important;padding:14px 16px !important;color:#e0f0ff !important;text-decoration:none !important;}"
-        ".wifilist li a:hover{background:#00d4ff !important;color:#050d1a !important;}"
-        ".wifilist li a span{background:#0e2a4a !important;color:#00d4ff !important;padding:4px 10px !important;border-radius:20px !important;font-size:.75rem !important;}"
-        "label{color:#4a7090 !important;font-size:.85rem !important;display:block !important;margin-top:10px !important;}"
-        "hr{border:none !important;border-top:1px solid #0e2a4a !important;margin:16px 0 !important;}"
-        "</style>"
-    );
-
-    wm.setTitle("⚡ LoKy ACC v" FIRMWARE_VERSION);
-
-    String apName = "LoKy-" + WiFi.macAddress().substring(12);
-    apName.replace(":", "");
-
-    bool ok = wm.autoConnect(apName.c_str(), "");
-
-    if (ok) {
-        if (strlen(param_id.getValue()) > 0) {
-            strncpy(participant_id, param_id.getValue(), sizeof(participant_id)-1);
-            strncpy(acc_name,       param_acc.getValue(), sizeof(acc_name)-1);
+    wm.addParameter(&p1);wm.addParameter(&p2);
+    wm.setConnectTimeout(20);wm.setConfigPortalTimeout(600);
+    wm.setScanDispPerc(true);wm.setBreakAfterConfig(true);wm.setCleanConnect(true);
+    wm.setCustomHeadElement("<style>body{font-family:Arial,sans-serif;background:#050d1a !important;color:#e0f0ff !important;margin:0;padding:16px;}body *{color:#e0f0ff;}h1{color:#00d4ff !important;text-align:center;}input[type=text],input[type=password]{background:#0a1628 !important;color:#e0f0ff !important;border:1px solid #00d4ff !important;border-radius:8px !important;padding:12px !important;width:100% !important;box-sizing:border-box !important;margin:6px 0 !important;}input[type=submit],button{background:linear-gradient(135deg,#00d4ff,#00ff9d) !important;color:#050d1a !important;border:none !important;padding:14px !important;border-radius:8px !important;font-weight:bold !important;width:100% !important;margin-top:10px !important;}.wifilist{list-style:none !important;padding:0 !important;}.wifilist li{background:#0a1628 !important;border:1px solid #0e2a4a !important;border-radius:10px !important;margin:8px 0 !important;overflow:hidden !important;}.wifilist li a{display:flex !important;justify-content:space-between !important;align-items:center !important;padding:14px 16px !important;color:#e0f0ff !important;text-decoration:none !important;}.wifilist li a:hover{background:#00d4ff !important;color:#050d1a !important;}.wifilist li a span{background:#0e2a4a !important;color:#00d4ff !important;padding:4px 10px !important;border-radius:20px !important;font-size:.75rem !important;}label{color:#4a7090 !important;font-size:.85rem !important;display:block !important;margin-top:10px !important;}</style>");
+    wm.setTitle("LoKy ACC v" FIRMWARE_VERSION);
+    String ap="LoKy-"+WiFi.macAddress().substring(12);ap.replace(":","");
+    bool ok=wm.autoConnect(ap.c_str(),"");
+    if(ok){
+        if(strlen(p1.getValue())>0){
+            strncpy(participant_id,p1.getValue(),sizeof(participant_id)-1);
+            strncpy(acc_name,p2.getValue(),sizeof(acc_name)-1);
             saveConfig();
         }
-        Serial.printf("[WIFI] ✓ Connecté ! SSID=%s IP=%s\n",
-                      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-        wifi_state = WIFI_OK;
-        return true;
+        Serial.printf("[WIFI] Connecte! %s IP=%s\n",WiFi.SSID().c_str(),WiFi.localIP().toString().c_str());
+        wifi_state=WIFI_OK;return true;
     }
-
     return false;
 }
 
-// ================================================
-// SETUP
-// ================================================
-void setup() {
-    Serial.begin(115200);
-    delay(500);
-    Serial.println("\n================================");
-    Serial.printf("  LoKy ACC v%s — Démarrage\n", FIRMWARE_VERSION);
-    Serial.println("================================");
-
-    pinMode(PIN_LED, OUTPUT);
-    pinMode(PIN_BTN, INPUT_PULLUP);
-    ledOn();
-
+void setup(){
+    Serial.begin(115200);delay(500);
+    Serial.printf("\n=== LoKy ACC v%s ===\n",FIRMWARE_VERSION);
+    Serial.printf("Config URL: %s\n",CONFIG_URL);
+    pinMode(PIN_LED,OUTPUT);pinMode(PIN_BTN,INPUT_PULLUP);ledOn();
     loadConfig();
-
-    // Connexion WiFi
-    bool connected = connectWiFi();
-
-    if (connected) {
-        // 1. Récupérer config serveur (URL API + version dispo)
-        Serial.println("[SETUP] Récupération config serveur...");
-        fetchServerConfig();
-
-        // 2. Vérifier et appliquer MAJ OTA au démarrage
-        Serial.println("[SETUP] Vérification mise à jour...");
+    if(connectWiFi()){
+        fetchGitHubConfig();
         checkAndUpdate();
-        // Si MAJ disponible → checkAndUpdate() redémarre le module
-        // Si on arrive ici → pas de MAJ, on continue normalement
     }
-
-    // Init JSY
-    Serial.println("[JSY] Initialisation...");
     jsy.setCallback(jsyCallback);
-    jsy.begin(Serial2, PIN_JSY_RX, PIN_JSY_TX, 4800);
-
-    unsigned long t = millis();
-    while (!jsy_ready && (millis() - t) < 10000) {
-        jsy.read(); delay(100);
-    }
-
-    if (jsy_ready) {
-        Serial.println("[JSY] ✓ Prêt !");
-    } else {
-        Serial.println("[JSY] ⚠ Pas de réponse");
-    }
-
+    jsy.begin(Serial2,PIN_JSY_RX,PIN_JSY_TX,4800);
+    unsigned long t=millis();
+    while(!jsy_ready&&(millis()-t)<10000){jsy.read();delay(100);}
+    Serial.println(jsy_ready?"[JSY] OK !":"[JSY] Pas de reponse");
     ledOff();
-    Serial.println("[SETUP] ✓ Prêt !\n");
-    Serial.println("Commandes : R=Reset WiFi | I=Infos | S=Envoyer | U=Check MAJ");
+    Serial.println("[SETUP] Pret!\nCommandes: R=Reset I=Infos S=Envoyer U=MAJ");
 }
 
-// ================================================
-// LOOP
-// ================================================
-void loop() {
-    unsigned long now = millis();
-
-    // Lecture JSY
+void loop(){
+    unsigned long now=millis();
     jsy.read();
-
-    // Gestion WiFi robuste
     handleWiFiReconnect();
-
-    // Bouton IO0
-    if (digitalRead(PIN_BTN) == LOW) {
-        if (!btn_was_pressed) {
-            btn_was_pressed = true;
-            btn_press_start = now;
-            long_press_done = false;
-        }
-        if (!long_press_done && (now - btn_press_start) >= LONG_PRESS_MS) {
-            long_press_done = true;
-            Serial.println("[BTN] Reset WiFi !");
-            ledOn(); delay(500);
-            WiFiManager wm; wm.resetSettings();
-            preferences.begin("loky", false); preferences.clear(); preferences.end();
-            delay(300); ESP.restart();
+    // Bouton
+    if(digitalRead(PIN_BTN)==LOW){
+        if(!btn_was_pressed){btn_was_pressed=true;btn_press_start=now;long_press_done=false;}
+        if(!long_press_done&&(now-btn_press_start)>=LONG_PRESS_MS){
+            long_press_done=true;ledOn();delay(500);
+            WiFiManager wm;wm.resetSettings();
+            preferences.begin("loky",false);preferences.clear();preferences.end();
+            delay(300);ESP.restart();
         }
     } else {
-        if (btn_was_pressed && !long_press_done) {
-            Serial.printf("[BTN] IP:%s ID:%s ACC:%s WiFi:%ddBm FW:v%s\n",
-                WiFi.localIP().toString().c_str(),
-                participant_id, acc_name, WiFi.RSSI(), FIRMWARE_VERSION);
+        if(btn_was_pressed&&!long_press_done){
+            Serial.printf("[BTN] IP:%s ID:%s ACC:%s v%s\n",
+                WiFi.localIP().toString().c_str(),participant_id,acc_name,FIRMWARE_VERSION);
             ledBlink(200);
         }
-        btn_was_pressed = false;
-        long_press_done = false;
+        btn_was_pressed=false;long_press_done=false;
     }
-
-    // Commandes série
-    if (Serial.available()) {
-        char c = Serial.read();
-        switch (c) {
-            case 'R': case 'r':
-                WiFiManager wm; wm.resetSettings();
-                preferences.begin("loky", false); preferences.clear(); preferences.end();
-                ESP.restart();
-                break;
-            case 'I': case 'i':
-                Serial.printf("[INFO] FW:v%s IP:%s ID:%s ACC:%s WiFi:%s(%ddBm) JSY:%s\n",
-                    FIRMWARE_VERSION, WiFi.localIP().toString().c_str(),
-                    participant_id, acc_name, WiFi.SSID().c_str(), WiFi.RSSI(),
-                    jsy_ready ? "OK" : "KO");
-                Serial.printf("[INFO] API:%s\n", api_url);
-                break;
-            case 'S': case 's':
-                Serial.println("[CMD] Envoi forcé !");
-                sendToServer(); break;
-            case 'U': case 'u':
-                Serial.println("[CMD] Vérification MAJ forcée !");
-                fetchServerConfig();
-                checkAndUpdate();
-                break;
-        }
+    // Série
+    if(Serial.available()){
+        char c=Serial.read();
+        if(c=='R'||c=='r'){WiFiManager wm;wm.resetSettings();preferences.begin("loky",false);preferences.clear();preferences.end();ESP.restart();}
+        else if(c=='I'||c=='i')Serial.printf("[INFO] v%s IP:%s ID:%s ACC:%s\n[INFO] API:%s\n[INFO] FW_URL:%s\n",FIRMWARE_VERSION,WiFi.localIP().toString().c_str(),participant_id,acc_name,api_url,firmware_url);
+        else if(c=='S'||c=='s'){sendToServer();}
+        else if(c=='U'||c=='u'){fetchGitHubConfig();checkAndUpdate();}
     }
-
-    // Envoi données périodique
-    if (has_pending && (now - last_send_ms) >= SEND_INTERVAL_MS) {
-        sendToServer();
+    if(has_pending&&(now-last_send_ms)>=SEND_INTERVAL_MS) sendToServer();
+    if(WiFi.status()==WL_CONNECTED&&(now-last_ota_check)>=OTA_CHECK_MS){
+        last_ota_check=now;fetchGitHubConfig();checkAndUpdate();
     }
-
-    // Vérification OTA toutes les heures
-    if (WiFi.status() == WL_CONNECTED &&
-        (now - last_ota_check) >= OTA_CHECK_MS) {
-        last_ota_check = now;
-        Serial.println("[OTA] Vérification horaire...");
-        fetchServerConfig();
-        checkAndUpdate();
+    if(now-prev_tick>=1000){
+        prev_tick=now;uptime_s++;
+        if(uptime_s%300==0)has_pending=true;
+        if(uptime_s%60==0)Serial.printf("[STATUS] v%s Up:%lus WiFi:%s JSY:%s P:%.1fW\n",
+            FIRMWARE_VERSION,uptime_s,WiFi.status()==WL_CONNECTED?"OK":"KO",jsy_ready?"OK":"KO",total_power);
     }
-
-    // Ticker 1s
-    if (now - prev_tick >= 1000) {
-        prev_tick = now;
-        uptime_s++;
-        if (uptime_s % 300 == 0) has_pending = true;
-        if (uptime_s % 60 == 0) {
-            Serial.printf("[STATUS] FW:v%s Uptime:%lus WiFi:%s JSY:%s P:%.1fW\n",
-                FIRMWARE_VERSION, uptime_s,
-                WiFi.status() == WL_CONNECTED ? "✓" : "✗",
-                jsy_ready ? "✓" : "✗", total_power);
-        }
-    }
-
-    // LED heartbeat
-    static unsigned long last_hb = 0;
-    if (wifi_state == WIFI_OK && now - last_hb >= 3000) {
-        last_hb = now; ledOn(); delay(50); ledOff();
-    }
-
-    // LED blink off
-    if (led_blink_ms && (now - led_blink_ms) >= (unsigned long)led_blink_dur) {
-        ledOff(); led_blink_ms = 0;
-    }
-
+    static unsigned long last_hb=0;
+    if(wifi_state==WIFI_OK&&now-last_hb>=3000){last_hb=now;ledOn();delay(50);ledOff();}
+    if(led_blink_ms&&(now-led_blink_ms)>=(unsigned long)led_blink_dur){ledOff();led_blink_ms=0;}
     delay(10);
 }
