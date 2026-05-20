@@ -1,6 +1,6 @@
 {
   "firmware_version": "4.0.0",
-  "api_url": "https://bidules3d.com/fred/loky/api.php",
+  "api_url": "https://bidules3d.com/fred/api.php",
   "firmware_url": "https://frederic76430.github.io/loky-config/firmware/loky_v4.0.0.bin",
   "update_url": "https://frederic76430.github.io/loky-config/firmware/",
   "min_version": "3.0.0",
