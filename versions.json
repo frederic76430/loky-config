@@ -1,6 +1,20 @@
 {
   "latest": "1.2.0",
   "versions": [
-        {"version": "1.2.0", "date": "2026-05-20", "notes": "Version initiale"}
+    {
+      "version": "1.2.0",
+      "date": "2026-05-23",
+      "notes": "OTA mensuel + fix HTTP"
+    },
+    {
+      "version": "1.1.0",
+      "date": "2026-05-23",
+      "notes": "Fix HTTPClient local"
+    },
+    {
+      "version": "1.0.0",
+      "date": "2026-05-23",
+      "notes": "Version initiale SurplusBox"
+    }
   ]
 }
