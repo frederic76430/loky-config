@@ -1,10 +1,10 @@
 {
-  "firmware_version": "3.0.0",
+  "firmware_version": "3.1.0",
   "api_url": "https://www.bidules3d.com/fred/api.php",
-  "firmware_url": "https://frederic76430.github.io/loky-config/firmware/SurplusBox_firmware_v3.0.0.bin",
+  "firmware_url": "https://frederic76430.github.io/loky-config/firmware/SurplusBox_firmware_v3.1.0.bin",
   "update_url": "https://frederic76430.github.io/loky-config/firmware/",
   "min_version": "1.0.0",
   "force_update": false,
-  "message": "SurplusBox v3.0.0",
-  "updated": "2026-05-23"
+  "message": "SurplusBox v3.1.0",
+  "updated": "2026-05-28"
 }

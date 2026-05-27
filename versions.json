@@ -1,10 +1,10 @@
 {
-  "latest": "3.0.0",
+  "latest": "3.1.0",
   "versions": [
     {
-      "version": "3.0.0",
-      "date": "2026-05-27",
-      "notes": "version3.0.0"
+      "version": "3.1.0",
+      "date": "2026-05-28",
+      "notes": "version3.1.0"
     }
   ]
 }
