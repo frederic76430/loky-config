@@ -1,10 +1,10 @@
 {
-  "latest": "1.7.0",
+  "latest": "3.0.0",
   "versions": [
     {
-      "version": "1.7.0",
-      "date": "2026-05-23",
-      "notes": "Redémarrage auto OTA + portail WiFi si box changée0"
+      "version": "3.0.0",
+      "date": "2026-05-27",
+      "notes": "versqion3.0.0"
     }
   ]
 }
